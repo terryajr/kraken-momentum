@@ -260,7 +260,7 @@ To run the trading simulation:
    - `take_profit_percentage`: The percentage increase at which to place limit sell orders
 3. Run the simulation script:
    ```
-   python simulation_script.py
+   python test.py
    ```
 4. Review the `trading_simulation_log.txt` file for detailed logs of the simulation results.
 
