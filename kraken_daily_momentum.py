@@ -6,24 +6,25 @@ import sqlite3
 import pandas_ta as ta
 from datetime import datetime, timedelta
 
-DB_PATH = os.path.abspath('~/kraken-momentum/crypto_data.db')
+DB_PATH = os.path.abspath('/Users/malciller/dev/kraken/DioKraken/crypto_data.db')
 TAKE_PROFIT_PERCENTAGE = 0.30
 TRAILING_STOP_STEP = 0.05  # 5% step for trailing stop
-TICKERS = ['SOL-USD', 'XRP-USD'] # , 'BTC-USD', ETH-USD',
-KRAKEN_PAIRS = {'SOL-USD': 'SOL/USD', 'XRP-USD': 'XRP/USD'} # , 'BTC-USD': 'BTC/USD', 'ETH-USD': 'ETH/USD',
-MIN_TRADE_VOLUME = {'SOL/USD': 0.02, 'XRP/USD': 10.0} #     , 'BTC/USD': 0.0001, 'ETH/USD': 0.002, 
+TICKERS = ['SOL-USD', 'XRP-USD', 'BTC-USD', 'ETH-USD']
+KRAKEN_PAIRS = {'SOL-USD': 'SOL/USD', 'XRP-USD': 'XRP/USD', 'BTC-USD': 'BTC/USD', 'ETH-USD': 'ETH/USD'}
+MIN_TRADE_VOLUME = {'SOL/USD': 0.02, 'XRP/USD': 10.0, 'BTC/USD': 0.0001, 'ETH/USD': 0.002}
 
 kraken = ccxt.kraken({
     'apiKey': os.environ.get('KRAKEN_API_KEY'),
     'secret': os.environ.get('KRAKEN_API_SECRET')
 })
 
+
 def create_tables(conn):
     cursor = conn.cursor()
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS crypto_data (
         ticker TEXT,
-        timestamp INTEGER,
+        timestamp TEXT,
         open REAL,
         high REAL,
         low REAL,
@@ -43,12 +44,12 @@ def create_tables(conn):
         trade_type TEXT,
         price REAL,
         volume REAL,
-        timestamp INTEGER,
+        timestamp TEXT,
         limit_order INTEGER,
         limit_price REAL,
         filled INTEGER DEFAULT 0,
         filled_at REAL,
-        filled_timestamp INTEGER,
+        filled_timestamp TEXT,
         trailing_stop_price REAL,
         current_step INTEGER DEFAULT 0
     )
@@ -57,7 +58,7 @@ def create_tables(conn):
 
 def log_trade(conn, ticker, pair, trade_type, price, volume, limit_order=0, limit_price=None, filled=0, filled_at=None, filled_timestamp=None, trailing_stop_price=None, current_step=0):
     cursor = conn.cursor()
-    timestamp = int(datetime.now().timestamp())
+    timestamp = datetime.now().isoformat()
     cursor.execute("""
     INSERT INTO trade_history 
     (ticker, pair, trade_type, price, volume, timestamp, limit_order, limit_price, filled, filled_at, filled_timestamp, trailing_stop_price, current_step)
@@ -78,21 +79,26 @@ def execute_trade(conn, pair, direction, volume):
         filled_price = fetch_ticker_price(pair)
         if filled_price:
             filled = 1 if direction == 'buy' else 0
-            log_trade(conn, pair.replace('/', ''), pair, direction, filled_price, volume, filled=filled)
+            log_trade(conn, pair.replace('/', '-'), pair, direction, filled_price, volume, filled=filled)
             print(f"Successfully placed {direction} order for {volume} of {pair} at price {filled_price}")
+            return order
         else:
             print("Order executed, but the ticker price could not be retrieved.")
+            return None
     except Exception as e:
         print(f"Exception while placing order: {str(e)}")
+        return None
 
 def execute_limit_sell(conn, pair, buy_price, volume):
     limit_price = buy_price * (1 + TAKE_PROFIT_PERCENTAGE)
     try:
-        kraken.create_limit_sell_order(pair, volume, limit_price)
-        log_trade(conn, pair.replace('/', ''), pair, 'sell', buy_price, volume, limit_order=1, limit_price=limit_price)
+        order = kraken.create_limit_sell_order(pair, volume, limit_price)
+        log_trade(conn, pair.replace('/', '-'), pair, 'sell', buy_price, volume, limit_order=1, limit_price=limit_price)
         print(f"Limit sell order placed for {volume} of {pair} at price {limit_price}")
+        return order
     except Exception as e:
         print(f"Exception while placing limit sell order: {str(e)}")
+        return None
 
 def update_trailing_stop(conn, order_id, new_stop_price, new_step):
     cursor = conn.cursor()
@@ -138,11 +144,12 @@ def check_order_fill(conn, ticker, current_price):
 
 def fill_order(conn, order_id, fill_price, fill_type):
     cursor = conn.cursor()
+    filled_timestamp = datetime.now().isoformat()
     cursor.execute("""
     UPDATE trade_history
     SET filled = 1, filled_at = ?, filled_timestamp = ?
     WHERE id = ?
-    """, (fill_price, int(datetime.now().timestamp()), order_id))
+    """, (fill_price, filled_timestamp, order_id))
     conn.commit()
     print(f"Order {order_id} filled at {fill_price} due to {fill_type}.")
 
@@ -153,7 +160,7 @@ def fetch_and_process_data(ticker, start_date, end_date):
         return pd.DataFrame()
 
     df = data.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
-    df['timestamp'] = df.index.astype(int) // 10**9
+    df['timestamp'] = df.index.strftime('%Y-%m-%d %H:%M:%S')
     df['rsi'] = ta.rsi(df['close'], length=14)
     df['ema'] = ta.ema(df['close'], length=20)
     df['50_MA'] = df['close'].rolling(window=50).mean()
@@ -199,16 +206,42 @@ def trade_based_on_trend(conn, ticker, pair):
         print(f"Not enough data to trade for {ticker}")
         return
 
-    current_price, previous_trend = rows[0][5], rows[1][9]
-    check_and_update_trailing_stop(conn, ticker, current_price)
+    current_price, previous_trend, current_trend = rows[0][5], rows[1][9], rows[0][9]
+    current_timestamp = rows[0][1]  # Now a string in ISO format
+    volume = MIN_TRADE_VOLUME[pair]
+
+    print(f"Trading {ticker} on pair {pair} with volume {volume} at current price {current_price}")
+    print(f"Current timestamp: {current_timestamp}")
+    print(f"Previous trend: {previous_trend}, Current trend: {current_trend}")
+
+    cursor.execute("""
+    SELECT id, price FROM trade_history
+    WHERE ticker = ? AND trade_type = 'buy'
+    ORDER BY timestamp DESC
+    LIMIT 1
+    """, (ticker.replace('/', '-'),))
+    buy_trade = cursor.fetchone()
+
+    if buy_trade:
+        buy_price = buy_trade[1]
+        price_increase = (current_price - buy_price) / buy_price
+
+        print(f"Buy price: {buy_price}, Current price: {current_price}, Price increase: {price_increase:.2%}")
+
+        if price_increase >= 0.06:
+            check_and_update_trailing_stop(conn, ticker, current_price)
+        else:
+            print(f"Current price has not increased by 6% from the buy price for {ticker}. No trailing stop order placed.")
+    
     check_order_fill(conn, ticker, current_price)
 
-    volume = MIN_TRADE_VOLUME[pair]
-    
-    if previous_trend == 'Bullish':
-        execute_trade(conn, pair, 'buy', volume)
-        execute_limit_sell(conn, pair, current_price, volume)
-    elif previous_trend == 'Bearish':
+    if previous_trend == 'Bearish' and current_trend == 'Bullish':
+        print(f"Bullish trend detected for {ticker}. Placing buy order.")
+        buy_order = execute_trade(conn, pair, 'buy', volume)
+        if buy_order:
+            print(f"Buy order placed for {ticker}. Monitoring price for trailing stop placement.")
+    elif previous_trend == 'Bullish' and current_trend == 'Bearish':
+        print(f"Bearish trend detected for {ticker}. Placing sell order.")
         execute_trade(conn, pair, 'sell', volume)
 
 def main():
@@ -217,7 +250,7 @@ def main():
     create_tables(conn)
 
     start_date = '2020-01-01'
-    end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    end_date = datetime.now().strftime('%Y-%m-%d')  # Fetch up to and including the current date
 
     for ticker in TICKERS:
         print(f"Processing {ticker}")
