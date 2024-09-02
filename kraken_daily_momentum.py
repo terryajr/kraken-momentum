@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 
 
-DB_PATH = os.path.abspath('/Users/malciller/dev/kraken/DioKraken/crypto_data.db')
+DB_PATH = os.path.abspath('/path/to/database/crypto_data.db')
 TAKE_PROFIT_PERCENTAGE = 0.30
 TRAILING_STOP_STEP = 0.05  # 5% step for trailing stop
 TICKERS = ['SOL-USD', 'XRP-USD', 'BTC-USD', 'ETH-USD']
