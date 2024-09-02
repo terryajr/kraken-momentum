@@ -6,6 +6,8 @@ import sqlite3
 import pandas_ta as ta
 from datetime import datetime, timedelta
 
+
+
 DB_PATH = os.path.abspath('/Users/malciller/dev/kraken/DioKraken/crypto_data.db')
 TAKE_PROFIT_PERCENTAGE = 0.30
 TRAILING_STOP_STEP = 0.05  # 5% step for trailing stop
@@ -81,6 +83,11 @@ def execute_trade(conn, pair, direction, volume):
             filled = 1 if direction == 'buy' else 0
             log_trade(conn, pair.replace('/', '-'), pair, direction, filled_price, volume, filled=filled)
             print(f"Successfully placed {direction} order for {volume} of {pair} at price {filled_price}")
+            
+            # Place take-profit limit sell order immediately after a successful buy
+            if direction == 'buy':
+                execute_limit_sell(conn, pair, filled_price, volume)
+            
             return order
         else:
             print("Order executed, but the ticker price could not be retrieved.")
@@ -99,6 +106,7 @@ def execute_limit_sell(conn, pair, buy_price, volume):
     except Exception as e:
         print(f"Exception while placing limit sell order: {str(e)}")
         return None
+
 
 def update_trailing_stop(conn, order_id, new_stop_price, new_step):
     cursor = conn.cursor()
@@ -195,31 +203,57 @@ def store_data(conn, ticker, df):
 def trade_based_on_trend(conn, ticker, pair):
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT * FROM crypto_data
+    SELECT close, timestamp FROM crypto_data
     WHERE ticker = ?
     ORDER BY timestamp DESC
-    LIMIT 2
+    LIMIT 200
     """, (ticker,))
     rows = cursor.fetchall()
     
-    if len(rows) < 2:
+    if len(rows) < 200:
         print(f"Not enough data to trade for {ticker}")
         return
 
-    current_price, previous_trend, current_trend = rows[0][5], rows[1][9], rows[0][9]
-    current_timestamp = rows[0][1]  # Now a string in ISO format
+    # Convert to DataFrame for easier manipulation
+    df = pd.DataFrame(rows, columns=['close', 'timestamp'])
+    df = df.sort_values('timestamp')
+    df['close'] = df['close'].astype(float)
+    
+    # Calculate 50 and 200 day EMAs
+    df['50_EMA'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['200_EMA'] = df['close'].ewm(span=200, adjust=False).mean()
+    
+    current_price = df['close'].iloc[-1]
+    current_timestamp = df['timestamp'].iloc[-1]
+    current_50_ema = df['50_EMA'].iloc[-1]
+    current_200_ema = df['200_EMA'].iloc[-1]
+    
+    # Determine current trend
+    current_trend = 'Bullish' if current_50_ema > current_200_ema else 'Bearish'
+    
     volume = MIN_TRADE_VOLUME[pair]
 
     print(f"Trading {ticker} on pair {pair} with volume {volume} at current price {current_price}")
     print(f"Current timestamp: {current_timestamp}")
-    print(f"Previous trend: {previous_trend}, Current trend: {current_trend}")
+    print(f"Current trend: {current_trend}")
 
+    # Always attempt to execute a trade based on the current trend
+    if current_trend == 'Bullish':
+        print(f"Bullish trend detected for {ticker}. Attempting buy order.")
+        buy_order = execute_trade(conn, pair, 'buy', volume)
+        if buy_order:
+            print(f"Buy order placed for {ticker}. Monitoring price for trailing stop placement.")
+    elif current_trend == 'Bearish':
+        print(f"Bearish trend detected for {ticker}. Attempting sell order.")
+        execute_trade(conn, pair, 'sell', volume)
+
+    # Check for existing buy trades and update trailing stops
     cursor.execute("""
     SELECT id, price FROM trade_history
     WHERE ticker = ? AND trade_type = 'buy'
     ORDER BY timestamp DESC
     LIMIT 1
-    """, (ticker.replace('/', '-'),))
+    """, (ticker,))
     buy_trade = cursor.fetchone()
 
     if buy_trade:
@@ -235,32 +269,34 @@ def trade_based_on_trend(conn, ticker, pair):
     
     check_order_fill(conn, ticker, current_price)
 
-    if previous_trend == 'Bearish' and current_trend == 'Bullish':
-        print(f"Bullish trend detected for {ticker}. Placing buy order.")
-        buy_order = execute_trade(conn, pair, 'buy', volume)
-        if buy_order:
-            print(f"Buy order placed for {ticker}. Monitoring price for trailing stop placement.")
-    elif previous_trend == 'Bullish' and current_trend == 'Bearish':
-        print(f"Bearish trend detected for {ticker}. Placing sell order.")
-        execute_trade(conn, pair, 'sell', volume)
-
+    
 def main():
     print(f"Using database at: {DB_PATH}")
     conn = sqlite3.connect(DB_PATH)
+    print("Database connection established.")
     create_tables(conn)
-
+    print("Tables checked/created.")
+    
     start_date = '2020-01-01'
     end_date = datetime.now().strftime('%Y-%m-%d')  # Fetch up to and including the current date
+    print(f"Start date: {start_date}, End date: {end_date}")
 
     for ticker in TICKERS:
         print(f"Processing {ticker}")
         df = fetch_and_process_data(ticker, start_date, end_date)
+        print(f"Fetched data for {ticker}, data size: {len(df)}")
         if not df.empty:
             store_data(conn, ticker, df)
+            print(f"Stored data for {ticker}")
             trade_based_on_trend(conn, ticker, KRAKEN_PAIRS[ticker])
+            print(f"Completed trading logic for {ticker}")
+        else:
+            print(f"No data to store for {ticker}")
 
     conn.close()
+    print("Database connection closed.")
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
