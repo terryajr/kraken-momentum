@@ -27,7 +27,7 @@ This Python script implements an automated crypto trading bot that uses a combin
 1. Clone this repository:
    ```
    git clone https://github.com/terryajr/kraken-momentum
-   cd <repository-directory>
+   cd /kraken-momentum
    ```
 
 2. Create a virtual environment:
